@@ -566,3 +566,4 @@ AI/src/fine-tuning/export/*.bin
 AI/src/fine-tuning/.venv/
 
 ToTo.csv
+results/
