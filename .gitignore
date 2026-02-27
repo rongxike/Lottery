@@ -564,3 +564,5 @@ AI/src/fine-tuning/output/
 AI/src/fine-tuning/export/*.gguf
 AI/src/fine-tuning/export/*.bin
 AI/src/fine-tuning/.venv/
+
+ToTo.csv
