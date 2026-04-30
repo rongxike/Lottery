@@ -244,17 +244,24 @@ def analyse(counts: np.ndarray, pick: int = PICK):
 # =============================================================================
 
 def compute_ABC(freq: dict, recommended: list, pick: int = PICK):
-    by_asc   = sorted(freq, key=freq.__getitem__)
-    by_desc  = list(reversed(by_asc))
+    """
+    Returns (anti_set, mixed_set) where each list is ordered
+    STRONGEST-FIRST so the 7th element is the weakest signal
+    (used as the 'additional' number).
+    """
+    by_asc   = sorted(freq, key=freq.__getitem__)         # cold -> hot
+    by_desc  = list(reversed(by_asc))                     # hot  -> cold
     rec_set  = set(recommended)
 
+    # B (cold): coldest first => strongest contrarian first
     anti_pool = [b for b in by_asc if b not in rec_set]
-    anti_set  = sorted(anti_pool[:pick])
+    anti_set  = anti_pool[:pick]
 
+    # C (mixed): hottest hots first, then coldest colds
     hot_n     = math.ceil(pick / 2)
-    hot_balls = [b for b in by_desc if b in rec_set][:hot_n]
     cold_n    = pick - hot_n
-    mixed_set = sorted(hot_balls + anti_set[:cold_n])
+    hot_balls = [b for b in by_desc if b in rec_set][:hot_n]
+    mixed_set = hot_balls + anti_set[:cold_n]
 
     return anti_set, mixed_set
 
@@ -305,7 +312,9 @@ def set_D_recency(draws, days_ago, num_balls, pick,
         else:
             acc += _chunk_cpu(log_w, this, pick, num_balls, rng)
         done += this
-    return sorted(int(b) + 1 for b in np.argsort(acc)[-pick:])
+    # ordered strongest-first (highest sim count first)
+    top_idx = np.argsort(acc)[-pick:][::-1]
+    return [int(b) + 1 for b in top_idx]
 
 
 def set_E_cooccurrence(draws, num_balls, pick) -> list:
@@ -323,7 +332,8 @@ def set_E_cooccurrence(draws, num_balls, pick) -> list:
         cands = np.where(mask)[0]
         scores = co[np.ix_(cands, selected)].sum(axis=1)
         selected.append(int(cands[np.argmax(scores)]))
-    return sorted(b + 1 for b in selected)
+    # `selected` already strongest-first (greedy picks best link each round)
+    return [b + 1 for b in selected]
 
 
 def set_F_genetic(draws, days_ago, num_balls, pick,
@@ -398,7 +408,14 @@ def set_F_genetic(draws, days_ago, num_balls, pick,
 
         pop = np.array(new_pop[:n_pop])
 
-    return sorted(int(b) + 1 for b in best_set)
+    # Rank balls inside best_set by their personal contribution to fitness:
+    # individual recency weight + sum of co-occurrence with the other 6 picks.
+    contrib = np.array([
+        rec_w[b] + sum(co_mat[b, o] for o in best_set if o != b) / max(co_max, 1.0)
+        for b in best_set
+    ])
+    order = np.argsort(contrib)[::-1]   # strongest first
+    return [int(best_set[i]) + 1 for i in order]
 
 
 def set_G_consensus(draws, num_balls, pick, windows=(100, 300, 500)) -> list:
@@ -417,7 +434,9 @@ def set_G_consensus(draws, num_balls, pick, windows=(100, 300, 500)) -> list:
         for b in top_set:
             scores[b] += 1
     key = scores.astype(np.float64) + all_counts / (all_counts.max() + 1)
-    return sorted(int(b) + 1 for b in np.argsort(key)[-pick:])
+    # strongest-first: highest consensus score first
+    top_idx = np.argsort(key)[-pick:][::-1]
+    return [int(b) + 1 for b in top_idx]
 
 
 def compute_all_sets(freq, counts_arr, draws, days_ago, pick, seed=None):
@@ -456,17 +475,21 @@ def compute_all_sets(freq, counts_arr, draws, days_ago, pick, seed=None):
     # Sort by vote count desc, break ties by sim frequency
     raw_freq = np.array([freq.get(b, 0) for b in range(NUM_BALLS + 1)], dtype=np.float64)
     sort_key_desc = votes.astype(np.float64) + raw_freq / (raw_freq.max() + 1)
-    star = sorted(int(b) for b in np.argsort(sort_key_desc)[-pick:])
+    # strongest-first (highest votes first); slot[6] = weakest of the 7 = additional
+    star = [int(b) for b in np.argsort(sort_key_desc)[-pick:][::-1]]
 
     # Set H — Least-vote: balls that appeared in the FEWEST strategies
     # Ties broken by lowest sim frequency (most contrarian overall)
     sort_key_asc = votes.astype(np.float64) - raw_freq / (raw_freq.max() + 1)
-    least_vote = sorted(int(b) for b in np.argsort(sort_key_asc)[:pick])
+    # already strongest-first (least-voted = strongest contrarian signal first)
+    least_vote = [int(b) for b in np.argsort(sort_key_asc)[:pick]]
 
-    # Set I — Mix 4×3: 4 least-vote balls + 3 vote-champion balls
-    lv_by_vote = sorted(least_vote, key=lambda b: (votes[b],  raw_freq[b]))
-    star_by_vote = sorted(star,      key=lambda b: (-votes[b], -raw_freq[b]))
-    mix_4x3 = sorted(lv_by_vote[:4] + star_by_vote[:3])
+    # Set I — Mix 4×3: 3 vote-champion (strongest support)
+    #                 + 4 least-vote (strongest contrarian first)
+    # The 7th slot (additional) is the weakest of the four LV picks.
+    lv_strongest = sorted(least_vote, key=lambda b: (votes[b],  raw_freq[b]))[:4]
+    star_strongest = sorted(star,     key=lambda b: (-votes[b], -raw_freq[b]))[:3]
+    mix_4x3 = star_strongest + lv_strongest
 
     elapsed = time.perf_counter() - t0
     print(f"[INFO] Advanced strategies done in {elapsed:.2f}s\n")
@@ -490,8 +513,12 @@ def compute_all_sets(freq, counts_arr, draws, days_ago, pick, seed=None):
 # =============================================================================
 
 def _fmt_set(label: str, tag: str, balls: list, bar: str):
+    """
+    `balls` MUST be ordered strongest-first.
+    The 6 strongest become the main; the 7th (weakest) becomes the additional.
+    """
     main = sorted(balls[:6])
-    rest = sorted(balls[6:])
+    rest = balls[6:]
     print(f"\n{bar}")
     print(f"  {label}")
     print(bar)
@@ -551,20 +578,21 @@ def print_report(freq, sets, weights, n_sims, elapsed):
         tags  = [t for t, s in tag_map.items() if ball in s]
         print(f"  {ball:>5}  {hw:>6.2f}%  {scnt:>13,}  {spct:>6.2f}%  {' '.join(tags)}")
 
+    # NOTE: pass each set RAW (strongest-first); _fmt_set picks the weakest as 'additional'.
     _fmt_set(f"SET A — HOT      (top {pick} most-frequent in sim)",
-             "pure hot — highest Gumbel-sim frequency", sorted(sets["A"]), bar)
+             "pure hot — highest Gumbel-sim frequency", sets["A"], bar)
     _fmt_set(f"SET B — COLD     (top {pick} least-frequent, not in A)",
-             "contrarian — lowest sim frequency", sorted(sets["B"]), bar)
+             "contrarian — lowest sim frequency", sets["B"], bar)
     _fmt_set(f"SET C — MIXED    ({hot_n} hottest from A  +  {cold_n} coldest from B)",
-             f"balanced — {hot_n} hot + {cold_n} cold", sorted(sets["C"]), bar)
+             f"balanced — {hot_n} hot + {cold_n} cold", sets["C"], bar)
     _fmt_set("SET D — RECENCY  (sim weighted by recency decay ~1yr half-life)",
-             "recent draws count 2x more per year", sorted(sets["D"]), bar)
+             "recent draws count 2x more per year", sets["D"], bar)
     _fmt_set("SET E — CO-OCCUR (greedy pairwise co-occurrence clique)",
-             "balls that appear together most in history", sorted(sets["E"]), bar)
+             "balls that appear together most in history", sets["E"], bar)
     _fmt_set("SET F — GENETIC  (GA maximising recency + co-occurrence fitness)",
-             "evolved combo — best blended score after 400 generations", sorted(sets["F"]), bar)
+             "evolved combo — best blended score after 400 generations", sets["F"], bar)
     _fmt_set("SET G — CONSENSUS (hot across last-100/300/500/all-time windows)",
-             "stable picks across all time-window views", sorted(sets["G"]), bar)
+             "stable picks across all time-window views", sets["G"], bar)
 
     # Vote counts per ball — only from the 7 independent strategies
     votes = {b: sum(1 for k, s in tag_map.items() if k in vote_keys and b in s)
@@ -579,24 +607,23 @@ def print_report(freq, sets, weights, n_sims, elapsed):
     vote_parts = [f"ball {b:>2} → {votes[b]}" for b in champ_balls_sorted]
     for line in [vote_parts[i:i+5] for i in range(0, len(vote_parts), 5)]:
         print("    " + "   ".join(f"{p:<16}" for p in line))
-    star = sorted(sets["star"])
-    main = sorted(star[:6])
-    rest = sorted(star[6:])
+    star_raw = sets["star"]                  # already strongest-first
+    main = sorted(star_raw[:6])
+    addl = star_raw[6]
     print(f"\n  Main numbers  : {main}")
-    if rest:
-        print(f"  Additional    : {rest[0] if len(rest) == 1 else rest}")
-    print(f"  Full set      : {star}")
+    print(f"  Additional    : {addl}")
+    print(f"  Full set      : {sorted(star_raw)}")
     print(f"  (cross-strategy consensus — strongest overall signal)")
 
     _fmt_set(f"SET H — LEAST VOTE  (top {pick} balls in the FEWEST strategies)",
              "contrarian consensus — ignored by most strategies",
-             sorted(sets["H"]), bar)
+             sets["H"], bar)
 
     star_top3  = sorted(sets["star"], key=lambda b: votes[b], reverse=True)[:3]
     lv_bot4    = sorted(sets["H"],    key=lambda b: votes[b])[:4]
     _fmt_set("SET I — MIX 4×3  (4 least-vote  +  3 vote-champion)",
              f"4 from Set H {sorted(lv_bot4)}  +  3 from Set ★ {sorted(star_top3)}",
-             sorted(sets["I"]), bar)
+             sets["I"], bar)
 
     print("\n" + bar + "\n")
 
@@ -612,6 +639,7 @@ def save_results(freq, sets, weights, n_sims, elapsed, output_dir=RESULTS_DIR):
     total_picks = n_sims * len(sets["A"])
 
     def _entry(key, balls):
+        # `balls` is strongest-first; weakest (slot 6) is the additional number.
         return {
             f"set_{key}":            sorted(balls),
             f"set_{key}_main":       sorted(balls[:6]),

@@ -359,3 +359,6 @@ ball,historical_weight_pct,sim_count,sim_pct,set_A,set_B,set_C,...,set_STAR,set_
 
 This tool is for **analytical and educational purposes only**.  
 Lottery outcomes are random — no statistical model can predict future draws. Play responsibly. 🍀
+
+## singapore oldest result:
+2341,2008-07-03,6,11,14,15,28,45,35,,4,2,3,3,1,3,1,0,1,,,,,,,,,,,,,,
