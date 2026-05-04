@@ -29,6 +29,7 @@ Usage
 """
 
 import argparse
+import itertools
 import json
 import math
 import os
@@ -439,6 +440,95 @@ def set_G_consensus(draws, num_balls, pick, windows=(100, 300, 500)) -> list:
     return [int(b) + 1 for b in top_idx]
 
 
+def _dedupe_preserve_order(values) -> list:
+    seen = set()
+    ordered = []
+    for value in values:
+        item = int(value)
+        if item not in seen:
+            seen.add(item)
+            ordered.append(item)
+    return ordered
+
+
+def _set_key(balls) -> tuple:
+    return tuple(sorted(int(ball) for ball in balls))
+
+
+def _pick_distinct_ranked_set(ranked_balls, pick, excluded_keys, pool_size=14) -> list:
+    """
+    Pick the best-ranked `pick`-ball combo that is not already present in
+    `excluded_keys`. Ranking is determined by the input order (best first).
+    """
+    ranked = _dedupe_preserve_order(ranked_balls)
+    if len(ranked) < pick:
+        raise ValueError("Not enough ranked balls to build a distinct set")
+
+    pool = ranked[:max(pick, min(pool_size, len(ranked)))]
+    positions = {ball: idx for idx, ball in enumerate(pool)}
+    best = None
+    best_rank = None
+
+    for combo in itertools.combinations(pool, pick):
+        key = _set_key(combo)
+        if key in excluded_keys:
+            continue
+        rank = tuple(sorted(positions[ball] for ball in combo))
+        if best_rank is None or rank < best_rank:
+            best_rank = rank
+            best = [ball for ball in pool if ball in combo]
+
+    if best is None:
+        for combo in itertools.combinations(ranked, pick):
+            key = _set_key(combo)
+            if key not in excluded_keys:
+                combo_set = set(combo)
+                return [ball for ball in ranked if ball in combo_set]
+        raise ValueError("Unable to build a distinct ranked set")
+
+    return best
+
+
+def _pick_distinct_mixed_set(primary_ranked, primary_count,
+                            secondary_ranked, secondary_count,
+                            excluded_keys, primary_pool=10, secondary_pool=10) -> list:
+    """
+    Pick a distinct mixed set while preserving the intended primary/secondary
+    ranking order inside the returned list.
+    """
+    primary = _dedupe_preserve_order(primary_ranked)
+    secondary = _dedupe_preserve_order(secondary_ranked)
+    primary = primary[:max(primary_count, min(primary_pool, len(primary)))]
+    secondary = secondary[:max(secondary_count, min(secondary_pool, len(secondary)))]
+
+    primary_pos = {ball: idx for idx, ball in enumerate(primary)}
+    secondary_pos = {ball: idx for idx, ball in enumerate(secondary)}
+    best = None
+    best_rank = None
+
+    for p_combo in itertools.combinations(primary, primary_count):
+        p_set = set(p_combo)
+        p_rank = tuple(sorted(primary_pos[ball] for ball in p_combo))
+        for s_combo in itertools.combinations(secondary, secondary_count):
+            union = p_set | set(s_combo)
+            if len(union) != primary_count + secondary_count:
+                continue
+            key = _set_key(union)
+            if key in excluded_keys:
+                continue
+            s_rank = tuple(sorted(secondary_pos[ball] for ball in s_combo))
+            rank = (p_rank, s_rank)
+            if best_rank is None or rank < best_rank:
+                best_rank = rank
+                best = ([ball for ball in primary if ball in p_set] +
+                        [ball for ball in secondary if ball in union and ball not in p_set])
+
+    if best is None:
+        raise ValueError("Unable to build a distinct mixed set")
+
+    return best
+
+
 def compute_all_sets(freq, counts_arr, draws, days_ago, pick, seed=None):
     """
     Compute sets A-G + the vote champion ★.
@@ -466,6 +556,16 @@ def compute_all_sets(freq, counts_arr, draws, days_ago, pick, seed=None):
     sg = set_G_consensus(draws, NUM_BALLS, pick)
     print("done")
 
+    used_keys = {
+        _set_key(recommended),
+        _set_key(anti_set),
+        _set_key(mixed_set),
+        _set_key(sd),
+        _set_key(se),
+        _set_key(sf),
+        _set_key(sg),
+    }
+
     # Vote champion: balls in the most strategies
     all_7 = [recommended, anti_set, mixed_set, sd, se, sf, sg]
     votes = np.zeros(NUM_BALLS + 1, dtype=np.int32)
@@ -476,20 +576,26 @@ def compute_all_sets(freq, counts_arr, draws, days_ago, pick, seed=None):
     raw_freq = np.array([freq.get(b, 0) for b in range(NUM_BALLS + 1)], dtype=np.float64)
     sort_key_desc = votes.astype(np.float64) + raw_freq / (raw_freq.max() + 1)
     # strongest-first (highest votes first); slot[6] = weakest of the 7 = additional
-    star = [int(b) for b in np.argsort(sort_key_desc)[-pick:][::-1]]
+    ranked_desc = [int(b) for b in np.argsort(sort_key_desc)[::-1] if b != 0]
+    star = _pick_distinct_ranked_set(ranked_desc, pick, used_keys)
+    used_keys.add(_set_key(star))
 
     # Set H — Least-vote: balls that appeared in the FEWEST strategies
     # Ties broken by lowest sim frequency (most contrarian overall)
     sort_key_asc = votes.astype(np.float64) - raw_freq / (raw_freq.max() + 1)
     # already strongest-first (least-voted = strongest contrarian signal first)
-    least_vote = [int(b) for b in np.argsort(sort_key_asc)[:pick]]
+    ranked_asc = [int(b) for b in np.argsort(sort_key_asc) if b != 0]
+    least_vote = _pick_distinct_ranked_set(ranked_asc, pick, used_keys)
+    used_keys.add(_set_key(least_vote))
 
     # Set I — Mix 4×3: 3 vote-champion (strongest support)
     #                 + 4 least-vote (strongest contrarian first)
     # The 7th slot (additional) is the weakest of the four LV picks.
-    lv_strongest = sorted(least_vote, key=lambda b: (votes[b],  raw_freq[b]))[:4]
-    star_strongest = sorted(star,     key=lambda b: (-votes[b], -raw_freq[b]))[:3]
-    mix_4x3 = star_strongest + lv_strongest
+    star_strongest = sorted(star, key=lambda b: (-votes[b], -raw_freq[b]))
+    lv_strongest = sorted(least_vote, key=lambda b: (votes[b], raw_freq[b]))
+    mix_4x3 = _pick_distinct_mixed_set(star_strongest, 3,
+                                       lv_strongest, 4,
+                                       used_keys)
 
     elapsed = time.perf_counter() - t0
     print(f"[INFO] Advanced strategies done in {elapsed:.2f}s\n")
@@ -619,8 +725,9 @@ def print_report(freq, sets, weights, n_sims, elapsed):
              "contrarian consensus — ignored by most strategies",
              sets["H"], bar)
 
-    star_top3  = sorted(sets["star"], key=lambda b: votes[b], reverse=True)[:3]
-    lv_bot4    = sorted(sets["H"],    key=lambda b: votes[b])[:4]
+    set_i_balls = set(sets["I"])
+    star_top3 = [b for b in sets["star"] if b in set_i_balls][:3]
+    lv_bot4 = [b for b in sets["H"] if b in set_i_balls][:4]
     _fmt_set("SET I — MIX 4×3  (4 least-vote  +  3 vote-champion)",
              f"4 from Set H {sorted(lv_bot4)}  +  3 from Set ★ {sorted(star_top3)}",
              sets["I"], bar)
