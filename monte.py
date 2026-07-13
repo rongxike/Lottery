@@ -51,8 +51,8 @@ except ImportError:
 # ── Constants ──────────────────────────────────────────────────────────────────
 DEFAULT_CSV         = "ToTo.csv"
 NUM_BALLS           = 49
-PICK                = 7           # 6 main + 1 additional  (ToTo format)
-DEFAULT_SIMULATIONS = 100_000_000
+PICK                = 8           # 6 main + 1 additional  (ToTo format)
+DEFAULT_SIMULATIONS = 10_000_000
 RESULTS_DIR         = "results"
 # ───────────────────────────────────────────────────────────────────────────────
 
@@ -826,9 +826,41 @@ def main():
 
     print_system_info()
 
+    # Interactive prompts for key parameters
+    print("\n" + "=" * 62)
+    print("  SIMULATION CONFIGURATION")
+    print("=" * 62)
+    
+    # Prompt for number of balls to pick
+    balls_input = input(f"\nHow many balls to pick? (default: {args.top}): ").strip()
+    if balls_input:
+        try:
+            args.top = int(balls_input)
+            if args.top < 1 or args.top > NUM_BALLS:
+                print(f"[WARNING] Invalid input. Using default: {PICK}")
+                args.top = PICK
+        except ValueError:
+            print(f"[WARNING] Invalid input. Using default: {PICK}")
+            args.top = PICK
+    
+    # Prompt for number of simulations
+    sims_input = input(f"How many simulations to run? (default: {args.simulations:,}): ").strip()
+    if sims_input:
+        try:
+            args.simulations = int(sims_input)
+            if args.simulations < 1:
+                print(f"[WARNING] Invalid input. Using default: {DEFAULT_SIMULATIONS:,}")
+                args.simulations = DEFAULT_SIMULATIONS
+        except ValueError:
+            print(f"[WARNING] Invalid input. Using default: {DEFAULT_SIMULATIONS:,}")
+            args.simulations = DEFAULT_SIMULATIONS
+    
+    print("=" * 62 + "\n")
+
     backend_label = "GPU (CuPy / CUDA)" if _GPU_AVAILABLE else "CPU (NumPy)"
-    print(f"\n[INFO] Backend     : {backend_label}")
+    print(f"[INFO] Backend     : {backend_label}")
     print(f"[INFO] Simulations : {args.simulations:,}")
+    print(f"[INFO] Balls to pick : {args.top}")
     print(f"[INFO] CSV         : {args.csv}")
 
     try:
